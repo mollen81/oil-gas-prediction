@@ -1,0 +1,111 @@
+---
+title: "Автоматизированная аналитика: Нефтегазовый сектор (США)"
+author: "mollen"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center', fig.width = 9, fig.height = 5)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+
+load("financial_data.RData")
+```
+
+## 1. Введение и объем данных
+
+Настоящий отчет сгенерирован автоматически на основе первичных выгрузок из терминала Bloomberg. Отчет включает разведочный анализ (EDA), проверку статистических гипотез и экстраполяцию временных рядов.
+
+* Количество проанализированных компаний: **`r length(unique(wide_data$Company))`**
+* Количество уникальных финансовых метрик: **`r ncol(wide_data) - 2`**
+
+---
+
+## 2. Исследовательский анализ (EDA)
+
+### 2.1. Распределение целевых показателей
+Анализ гистограмм демонстрирует правостороннюю асимметрию выручки и наличие отрицательных значений у операционной прибыли.
+
+```{r eda-plots}
+p1 <- ggplot(wide_data, aes(x = Revenue)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  scale_x_continuous(labels = scales::comma) +
+  labs(title = "Распределение выручки", x = "Млн долл.", y = "Частота") +
+  theme_minimal()
+
+p2 <- ggplot(wide_data, aes(x = `Operating Income`)) +
+  geom_histogram(bins = 40, fill = "seagreen", color = "white") +
+  scale_x_continuous(labels = scales::comma) +
+  labs(title = "Распределение операционной прибыли", x = "Млн долл.", y = "Частота") +
+  theme_minimal()
+
+p1
+p2
+```
+
+### 2.2. Анализ выбросов (Operating Income)
+Наличие отрицательных значений наглядно видно на диаграмме размаха. Данный факт жестко ограничивает применимость мультипликативных моделей прогнозирования.
+
+```{r boxplot}
+ggplot(wide_data, aes(x = "", y = `Operating Income`)) +
+  geom_boxplot(fill = "tomato", alpha = 0.7, outlier.color = "red", width = 0.4) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Диаграмма размаха: Operating Income", x = "", y = "Млн долл.") +
+  theme_minimal()
+```
+
+---
+
+## 3. Статистический анализ
+
+### 3.1. Проверка структурного сдвига (t-тест Стьюдента)
+Проверка гипотезы о падении средней выручки в период макроэкономического шока.
+
+```{r t-test}
+pre_crisis <- wide_data %>% filter(grepl("'18|'19", Period)) %>% pull(Revenue)
+crisis_2020 <- wide_data %>% filter(grepl("Q1 '20|Q2 '20", Period)) %>% pull(Revenue)
+
+res <- t.test(pre_crisis, crisis_2020, alternative = "greater")
+```
+
+* **Средняя выручка до кризиса (2018–2019):** `r round(res$estimate[1], 2)` млн долл.
+* **Средняя выручка в острую фазу 2020:** `r round(res$estimate[2], 2)` млн долл.
+* **p-value:** `r round(res$p.value, 4)`
+
+---
+
+## 4. Прогнозирование (Метод Холта-Уинтерса)
+
+Автоматический расчет спецификации с бэктестингом на горизонт 8 кварталов вперед.
+
+```{r holt-winters}
+target_comp <- unique(data_ts$Company)[1]
+
+forecast_financials_rmd <- function(dataset, target_company, metric_name, h_forecast = 8) {
+  comp_data <- dataset %>% filter(Company == target_company)
+  train_data <- comp_data %>% filter(Year <= 2018)
+  test_data <- comp_data %>% filter(Year > 2018)
+  
+  train_ts <- ts(train_data[[metric_name]], start = c(train_data$Year[1], train_data$Quarter[1]), frequency = 4)
+  test_ts <- ts(test_data[[metric_name]], start = c(test_data$Year[1], test_data$Quarter[1]), frequency = 4)
+  
+  min_val <- min(train_ts, na.rm = TRUE)
+  best_model <- hw(train_ts, seasonal = "additive", h = h_forecast)
+  
+  autoplot(best_model) +
+    autolayer(test_ts, series = "Фактические данные", size = 1) +
+    labs(title = paste("Прогноз:", target_company, "-", metric_name), y = "Млн долл.", x = "Год") +
+    theme_minimal() +
+    scale_color_manual(values = c("Фактические данные" = "red"))
+}
+
+forecast_financials_rmd(data_ts, target_comp, "Revenue")
+forecast_financials_rmd(data_ts, target_comp, "Operating Income")
+```
